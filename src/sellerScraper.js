@@ -45,16 +45,34 @@ export async function scrapeSellersByCategory({ categoryConfig, maxSellers, prox
 
                 const productUrls = await page.evaluate(() => {
                     const links = [];
-                    document.querySelectorAll('[data-component-type="s-search-result"] h2 a[href*="/dp/"]').forEach(el => {
-                        const href = el.getAttribute('href');
-                        if (href && href.includes('/dp/')) {
-                            const clean = href.startsWith('http') ? href : `https://www.amazon.de${href}`;
-                            links.push(clean.split('?')[0]);
+                    // Versuche verschiedene Selektoren für Suchergebnisse
+                    const resultItems = document.querySelectorAll('[data-component-type="s-search-result"], .s-result-item[data-asin], div[data-asin]');
+                    
+                    resultItems.forEach(item => {
+                        const linkEl = item.querySelector('h2 a[href*="/dp/"], a.a-link-normal[href*="/dp/"]');
+                        if (linkEl) {
+                            const href = linkEl.getAttribute('href');
+                            if (href && href.includes('/dp/')) {
+                                const clean = href.startsWith('http') ? href : `https://www.amazon.de${href}`;
+                                links.push(clean.split('?')[0]);
+                            }
                         }
                     });
+
+                    // Fallback: Alle /dp/ Links auf der Seite (außer gesponserte/andere)
+                    if (links.length === 0) {
+                        document.querySelectorAll('a[href*="/dp/"]').forEach(el => {
+                            const href = el.getAttribute('href');
+                            if (href && !href.includes('slredirect') && !href.includes('picassoRedirect')) {
+                                const clean = href.startsWith('http') ? href : `https://www.amazon.de${href}`;
+                                links.push(clean.split('?')[0]);
+                            }
+                        });
+                    }
+
                     return [...new Set(links)].slice(0, 15);
                 });
-                log.info(`🔗 ${productUrls.length} Produkt-URLs auf Seite ${pageNum}`);
+                log.info(`🔗 ${productUrls.length} Produkt-URLs auf Seite ${pageNum} gefunden.`);
 
                 const reqs = productUrls.filter(() => collectedSellers.size < maxSellers)
                     .map(url => ({ url, userData: { type: 'PRODUCT_PAGE' } }));
