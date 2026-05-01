@@ -10,14 +10,21 @@ export async function scrapeSellersByCategory({ categoryConfig, maxSellers, prox
 
     const crawler = new PlaywrightCrawler({
         proxyConfiguration: proxyConfig,
-        maxConcurrency: 2,
-        requestHandlerTimeoutSecs: 90,
+        maxConcurrency: 1,            // Reduziert auf 1 wegen Memory-Overload (1GB Limit)
+        requestHandlerTimeoutSecs: 120,
         maxRequestRetries: 3,
         navigationTimeoutSecs: 60,
         launchContext: {
             launchOptions: {
                 headless: true,
-                args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--lang=de-DE'],
+                args: [
+                    '--no-sandbox', 
+                    '--disable-setuid-sandbox', 
+                    '--disable-dev-shm-usage', 
+                    '--disable-gpu', 
+                    '--lang=de-DE',
+                    '--disable-extensions',
+                ],
             },
         },
         preNavigationHooks: [
@@ -35,13 +42,14 @@ export async function scrapeSellersByCategory({ categoryConfig, maxSellers, prox
 
             const title = await page.title();
             if (title.toLowerCase().includes('robot') || title.toLowerCase().includes('captcha')) {
+                log.error('⚠️ Amazon Captcha erkannt! Proxy wechseln...');
                 throw new Error('CAPTCHA detected');
             }
 
             // ── SUCHERGEBNISSEITE ────────────────────────────────────────────
             if (type === 'SEARCH_PAGE') {
                 log.info(`📄 Suchergebnisseite ${pageNum}: ${request.url}`);
-                await page.waitForSelector('[data-component-type="s-search-result"]', { timeout: 15000 }).catch(() => {});
+                await page.waitForSelector('.s-result-item, [data-component-type="s-search-result"]', { timeout: 20000 }).catch(() => {});
 
                 const productUrls = await page.evaluate(() => {
                     const links = [];
@@ -52,14 +60,14 @@ export async function scrapeSellersByCategory({ categoryConfig, maxSellers, prox
                         const linkEl = item.querySelector('h2 a[href*="/dp/"], a.a-link-normal[href*="/dp/"]');
                         if (linkEl) {
                             const href = linkEl.getAttribute('href');
-                            if (href && href.includes('/dp/')) {
+                            if (href && href.includes('/dp/') && !href.includes('slredirect')) {
                                 const clean = href.startsWith('http') ? href : `https://www.amazon.de${href}`;
                                 links.push(clean.split('?')[0]);
                             }
                         }
                     });
 
-                    // Fallback: Alle /dp/ Links auf der Seite (außer gesponserte/andere)
+                    // Fallback
                     if (links.length === 0) {
                         document.querySelectorAll('a[href*="/dp/"]').forEach(el => {
                             const href = el.getAttribute('href');
@@ -89,18 +97,15 @@ export async function scrapeSellersByCategory({ categoryConfig, maxSellers, prox
             // ── PRODUKTSEITE ─────────────────────────────────────────────────
             } else if (type === 'PRODUCT_PAGE') {
                 if (collectedSellers.size >= maxSellers) return;
-                await page.waitForSelector('#dp, #ppd', { timeout: 10000 }).catch(() => {});
+                await page.waitForSelector('#dp, #ppd, #merchant-info', { timeout: 15000 }).catch(() => {});
 
-                // FIX 1: Nur #sellerProfileTriggerId oder #merchant-info Links verwenden
                 const sellerInfo = await page.evaluate(() => {
-                    // Primär: #sellerProfileTriggerId hat den echten Händlernamen
                     const trigger = document.querySelector('#sellerProfileTriggerId');
                     if (trigger) {
                         const href = trigger.getAttribute('href') || '';
                         const m = href.match(/seller=([A-Z0-9]+)/);
                         if (m) return { sellerId: m[1], sellerName: trigger.textContent.trim() };
                     }
-                    // Sekundär: im #merchant-info Bereich suchen
                     const merchant = document.querySelector('#merchant-info');
                     if (merchant) {
                         const link = merchant.querySelector('a[href*="/sp?"]');
@@ -110,7 +115,6 @@ export async function scrapeSellersByCategory({ categoryConfig, maxSellers, prox
                             if (m) return { sellerId: m[1], sellerName: link.textContent.trim() };
                         }
                     }
-                    // Tertiär: "Verkauf durch" Text suchen
                     const buyBox = document.querySelector('#tabular-buybox, #desktop_buybox');
                     if (buyBox) {
                         const link = buyBox.querySelector('a[href*="seller="]');
@@ -118,7 +122,6 @@ export async function scrapeSellersByCategory({ categoryConfig, maxSellers, prox
                             const href = link.getAttribute('href') || '';
                             const m = href.match(/seller=([A-Z0-9]+)/);
                             const name = link.textContent.trim();
-                            // "Details" überspringen
                             if (m && name && name !== 'Details' && name.length > 1) {
                                 return { sellerId: m[1], sellerName: name };
                             }
@@ -129,30 +132,33 @@ export async function scrapeSellersByCategory({ categoryConfig, maxSellers, prox
 
                 if (!sellerInfo?.sellerId) return;
 
-                // FIX 2: Amazon selbst überspringen
-                const name = sellerInfo.sellerName.toLowerCase();
-                if (name.includes('amazon') || name === 'details' || name.length < 2) {
-                    log.info(`⏭️ Amazon/ungültiger Seller übersprungen: ${sellerInfo.sellerName}`);
+                const nameLower = sellerInfo.sellerName.toLowerCase();
+                if (nameLower.includes('amazon') || nameLower === 'details') {
                     return;
                 }
 
-                // FIX 3: Deduplizierung VOR dem Enqueuen
                 if (enqueuedSellerIds.has(sellerInfo.sellerId) || collectedSellers.has(sellerInfo.sellerId)) return;
                 enqueuedSellerIds.add(sellerInfo.sellerId);
 
-                log.info(`🔍 Seller: ${sellerInfo.sellerName} (${sellerInfo.sellerId})`);
+                log.info(`🔍 Seller gefunden: ${sellerInfo.sellerName} (${sellerInfo.sellerId})`);
                 await crawler.addRequests([{
                     url: `https://www.amazon.de/sp?seller=${sellerInfo.sellerId}&marketplaceID=A1PA6795UKMFR9`,
-                    userData: { type: 'SELLER_PROFILE', sellerId: sellerInfo.sellerId, sellerName: sellerInfo.sellerName, category: categoryName },
+                    userData: { 
+                        type: 'SELLER_PROFILE', 
+                        sellerId: sellerInfo.sellerId, 
+                        sellerName: sellerInfo.sellerName, 
+                        category: categoryName 
+                    },
                 }]);
 
             // ── SELLER-PROFILSEITE ───────────────────────────────────────────
             } else if (type === 'SELLER_PROFILE') {
                 if (collectedSellers.size >= maxSellers) return;
                 const { sellerId, sellerName } = request.userData;
-                log.info(`👤 Händler-Profil: ${sellerName} (${sellerId})`);
+                log.info(`👤 Händler-Profil wird analysiert: ${sellerName} (${sellerId})`);
 
-                await page.waitForSelector('#seller-profile-container, #page-section-detail-seller-info, .seller-info', { timeout: 15000 }).catch(() => {});
+                await page.waitForSelector('#seller-profile-container, #page-section-detail-seller-info, .seller-info, .a-box', { timeout: 20000 }).catch(() => {});
+                
                 const impressum = await extractImpressum(page);
 
                 const sellerData = {
@@ -168,7 +174,11 @@ export async function scrapeSellersByCategory({ categoryConfig, maxSellers, prox
                 };
 
                 collectedSellers.set(sellerId, sellerData);
-                log.info(`✅ [${collectedSellers.size}/${maxSellers}] ${sellerData.sellerName} | 📧 ${sellerData.email || '—'} | 📞 ${sellerData.phone || '—'}`);
+                
+                // SOFORT SPEICHERN
+                await Actor.pushData(sellerData);
+                
+                log.info(`✅ [${collectedSellers.size}/${maxSellers}] GESPEICHERT: ${sellerData.sellerName} | 📧 ${sellerData.email || '—'}`);
             }
         },
 
@@ -189,56 +199,56 @@ async function extractImpressum(page) {
     const result = { companyName: '', email: '', phone: '', address: '', ustId: '' };
 
     try {
-        // Impressum/Detail-Link anklicken falls vorhanden
+        // Prüfen ob wir schon auf der richtigen Unterseite sind oder klicken müssen
         const detailLink = await page.$('a:has-text("Impressum"), a:has-text("Detaillierte Verkäuferinformationen"), a:has-text("Geschäftsadresse")');
         if (detailLink) {
-            await detailLink.click();
-            await page.waitForTimeout(2000);
+            await detailLink.click().catch(() => {});
+            await page.waitForTimeout(2000); // Kurz warten auf JS-Update
         }
 
-        // FIX: Gezielt den Seller-Info-Bereich extrahieren, NICHT den ganzen Body
-        const pageText = await page.evaluate(() => {
-            // Prioritätsreihenfolge: spezifische Seller-Info-Container
-            const selectors = [
-                '#page-section-detail-seller-info',
-                '#seller-profile-container',
-                '.a-box-group',
-                '#spp-expander-container',
-            ];
-            for (const sel of selectors) {
-                const el = document.querySelector(sel);
-                if (el && el.innerText.trim().length > 50) return el.innerText;
-            }
-            // Fallback: Alle .a-section Elemente zusammenfassen (nicht body!)
-            const sections = document.querySelectorAll('.a-section');
-            let text = '';
-            sections.forEach(s => { text += s.innerText + '\n'; });
-            return text || document.body.innerText;
+        const data = await page.evaluate(() => {
+            const getEmail = (text) => {
+                const emails = text.match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g) || [];
+                return emails.find(e => !e.toLowerCase().includes('amazon')) || '';
+            };
+
+            const getPhone = (text) => {
+                const m = text.match(/(?:Tel(?:efon)?\.?:?\s*|Phone:?\s*|Fon:?\s*|Mobil:?\s*)(\+?[\d\s\-\/\(\)]{7,20})/i);
+                return m ? m[1].trim().replace(/\s+/g, ' ') : '';
+            };
+
+            const getUst = (text) => {
+                const m = text.match(/(?:USt\.?-?Id[^\n]*?:?\s*|VAT[^\n]*?:?\s*)(DE\d{9})/i);
+                return m ? m[1].trim() : '';
+            };
+
+            const getAddress = (text) => {
+                const m = text.match(/([A-Za-zäöüÄÖÜß\s\-\.]+\d*[,\s]+\d{5}\s+[A-Za-zäöüÄÖÜß\s\-]+)/);
+                return m ? m[1].trim().replace(/\s+/g, ' ') : '';
+            };
+
+            const getCompany = (text) => {
+                const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 3);
+                return lines.find(l => /\b(gmbh|kg|ag|e\.k\.?|gbr|ug|ohg|ltd|inc|s\.r\.l|b\.v)\b/i.test(l)) || '';
+            };
+
+            // Suche in spezifischen Containern
+            const container = document.querySelector('#page-section-detail-seller-info') || 
+                              document.querySelector('#seller-profile-container') || 
+                              document.querySelector('.a-box-group') ||
+                              document.body;
+            
+            const text = container.innerText;
+            return {
+                email: getEmail(text),
+                phone: getPhone(text),
+                ustId: getUst(text),
+                address: getAddress(text),
+                companyName: getCompany(text)
+            };
         });
 
-        // E-Mail (Amazon-eigene ausfiltern!)
-        const emails = pageText.match(/[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g) || [];
-        const sellerEmail = emails.find(e => !e.toLowerCase().includes('amazon'));
-        if (sellerEmail) result.email = sellerEmail.trim();
-
-        // Telefon
-        const phoneMatch = pageText.match(/(?:Tel(?:efon)?\.?:?\s*|Phone:?\s*|Fon:?\s*|Mobil:?\s*)(\+?[\d\s\-\/\(\)]{7,20})/i);
-        if (phoneMatch) result.phone = phoneMatch[1].trim().replace(/\s+/g, ' ');
-
-        // USt-ID
-        const ustMatch = pageText.match(/(?:USt\.?-?Id[^\n]*?:?\s*|VAT[^\n]*?:?\s*)(DE\d{9})/i);
-        if (ustMatch) result.ustId = ustMatch[1].trim();
-
-        // Firmenname
-        const lines = pageText.split('\n').map(l => l.trim()).filter(l => l.length > 3);
-        const companyLine = lines.find(l =>
-            /\b(gmbh|kg|ag|e\.k\.?|gbr|ug|ohg|ltd|inc|s\.r\.l|b\.v)\b/i.test(l)
-        );
-        if (companyLine) result.companyName = companyLine;
-
-        // Adresse (PLZ-Muster)
-        const addressMatch = pageText.match(/([A-Za-zäöüÄÖÜß\s\-\.]+\d*[,\s]+\d{5}\s+[A-Za-zäöüÄÖÜß\s\-]+)/);
-        if (addressMatch) result.address = addressMatch[1].trim().replace(/\s+/g, ' ');
+        Object.assign(result, data);
 
     } catch (err) {
         log.warning(`⚠️ Impressum-Extraktion fehlgeschlagen: ${err.message}`);
