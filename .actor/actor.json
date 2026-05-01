@@ -1,0 +1,41 @@
+{
+  "actorSpecification": 1,
+  "name": "amazon-seller-scraper-de",
+  "title": "Amazon Seller Scraper Germany",
+  "description": "Scrapes Amazon.de sellers by category with contact details from Impressum. Exports to Excel.",
+  "version": "1.0",
+  "buildTag": "latest",
+  "environmentVariables": {},
+  "dockerfile": "../Dockerfile",
+  "storages": {
+    "dataset": {
+      "actorSpecification": 1,
+      "views": {
+        "overview": {
+          "title": "Sellers Overview",
+          "transformation": {
+            "fields": [
+              "sellerName",
+              "email",
+              "phone",
+              "category",
+              "address",
+              "storeUrl"
+            ]
+          },
+          "display": {
+            "component": "table",
+            "properties": {
+              "sellerName": { "label": "Händlername", "format": "text" },
+              "email":      { "label": "E-Mail",       "format": "text" },
+              "phone":      { "label": "Telefon",       "format": "text" },
+              "category":   { "label": "Branche",       "format": "text" },
+              "address":    { "label": "Adresse",        "format": "text" },
+              "storeUrl":   { "label": "Amazon-Profil",  "format": "link" }
+            }
+          }
+        }
+      }
+    }
+  }
+}

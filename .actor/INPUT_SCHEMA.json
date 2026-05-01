@@ -1,0 +1,78 @@
+{
+  "title": "Amazon Seller Scraper — Eingabe",
+  "description": "Konfiguriere den Scraper für Amazon.de-Händler nach Branche.",
+  "type": "object",
+  "schemaVersion": 1,
+  "properties": {
+    "category": {
+      "title": "Branche / Kategorie",
+      "type": "string",
+      "description": "Amazon-Kategorie, die gescrapt werden soll. Beispiele: Baumarkt, Elektronik, Sport, Küche, Garten, Spielzeug",
+      "editor": "select",
+      "enum": [
+        "Baumarkt",
+        "Elektronik",
+        "Sport & Freizeit",
+        "Küche & Haushalt",
+        "Garten",
+        "Spielzeug",
+        "Bekleidung",
+        "Bürobedarf",
+        "Lebensmittel",
+        "Gesundheit & Kosmetik",
+        "Schmuck",
+        "Automotive",
+        "Haustier",
+        "Musikinstrumente",
+        "Software"
+      ],
+      "enumTitles": [
+        "🔨 Baumarkt",
+        "💻 Elektronik",
+        "⚽ Sport & Freizeit",
+        "🍳 Küche & Haushalt",
+        "🌿 Garten",
+        "🧸 Spielzeug",
+        "👗 Bekleidung",
+        "📎 Bürobedarf",
+        "🛒 Lebensmittel",
+        "💊 Gesundheit & Kosmetik",
+        "💍 Schmuck",
+        "🚗 Automotive",
+        "🐾 Haustier",
+        "🎵 Musikinstrumente",
+        "💿 Software"
+      ],
+      "default": "Baumarkt"
+    },
+    "maxSellers": {
+      "title": "Maximale Anzahl Händler",
+      "type": "integer",
+      "description": "Wie viele Händler sollen gescrapt werden? (1–500). Pro Händler wird 1 Token berechnet.",
+      "minimum": 1,
+      "maximum": 500,
+      "default": 50,
+      "editor": "number"
+    },
+    "proxyConfiguration": {
+      "title": "Proxy-Konfiguration",
+      "type": "object",
+      "description": "Empfohlen: Apify Residential Proxies für beste Ergebnisse mit Amazon.",
+      "editor": "proxy",
+      "prefill": {
+        "useApifyProxy": true,
+        "apifyProxyGroups": ["RESIDENTIAL"]
+      }
+    },
+    "exportFormat": {
+      "title": "Export-Format",
+      "type": "string",
+      "description": "In welchem Format soll die Ausgabe gespeichert werden?",
+      "editor": "select",
+      "enum": ["excel", "both"],
+      "enumTitles": ["📊 Nur Excel (.xlsx)", "📊 Excel + 📋 JSON Dataset"],
+      "default": "both"
+    }
+  },
+  "required": ["category", "maxSellers"]
+}
