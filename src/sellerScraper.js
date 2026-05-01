@@ -1,4 +1,4 @@
-import { PlaywrightCrawler, RequestQueue, log } from 'crawlee';
+import { PlaywrightCrawler, log } from 'crawlee';
 import { Actor } from 'apify';
 
 /**
@@ -12,19 +12,12 @@ export async function scrapeSellersByCategory({ categoryConfig, maxSellers, prox
     const { searchUrl, name: categoryName } = categoryConfig;
     const collectedSellers = new Map(); // sellerId → Daten
 
-    // Request Queue aufbauen
-    const requestQueue = await RequestQueue.open();
-    await requestQueue.addRequest({
-        url: searchUrl,
-        userData: { type: 'SEARCH_PAGE', page: 1 },
-    });
-
     const crawler = new PlaywrightCrawler({
-        requestQueue,
         proxyConfiguration: proxyConfig,
         maxConcurrency: 2,            // Niedrig halten um Amazon nicht zu triggern
-        requestHandlerTimeoutSecs: 60,
+        requestHandlerTimeoutSecs: 90,
         maxRequestRetries: 3,
+        navigationTimeoutSecs: 60,
 
         launchContext: {
             launchOptions: {
@@ -33,6 +26,7 @@ export async function scrapeSellersByCategory({ categoryConfig, maxSellers, prox
                     '--no-sandbox',
                     '--disable-setuid-sandbox',
                     '--disable-dev-shm-usage',
+                    '--disable-gpu',
                     '--lang=de-DE',
                 ],
             },
@@ -42,8 +36,8 @@ export async function scrapeSellersByCategory({ categoryConfig, maxSellers, prox
         preNavigationHooks: [
             async ({ page }) => {
                 await page.setExtraHTTPHeaders({
-                    'Accept-Language': 'de-DE,de;q=0.9',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                    'Accept-Language': 'de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
                 });
                 // Amazon-spezifische Cookies (Sprachversion)
                 await page.context().addCookies([{
@@ -55,25 +49,32 @@ export async function scrapeSellersByCategory({ categoryConfig, maxSellers, prox
             },
         ],
 
-        async requestHandler({ request, page, enqueueLinks }) {
+        async requestHandler({ request, page }) {
             const { type, page: pageNum } = request.userData;
 
             // ── CAPTCHA erkennen ────────────────────────────────────────────
             const title = await page.title();
             if (title.toLowerCase().includes('robot') || title.toLowerCase().includes('captcha')) {
                 log.warning(`⚠️ CAPTCHA erkannt auf ${request.url} — Retry wird ausgelöst`);
-                throw new Error('CAPTCHA detected');
+                throw new Error('CAPTCHA detected — retrying with new proxy');
             }
 
             // ── SUCHERGEBNISSEITE verarbeiten ───────────────────────────────
             if (type === 'SEARCH_PAGE') {
                 log.info(`📄 Verarbeite Suchergebnisseite ${pageNum}: ${request.url}`);
 
+                // Warten bis Suchergebnisse geladen
+                await page.waitForSelector('[data-component-type="s-search-result"], .s-result-item', {
+                    timeout: 15000,
+                }).catch(() => {
+                    log.warning(`⚠️ Keine Suchergebnisse auf Seite ${pageNum} gefunden`);
+                });
+
                 // Produkt-Links extrahieren
                 const productUrls = await page.evaluate(() => {
                     const links = [];
                     document.querySelectorAll(
-                        'a.a-link-normal.s-no-outline, h2.a-size-mini a, a[href*="/dp/"]'
+                        '[data-component-type="s-search-result"] a.a-link-normal[href*="/dp/"], h2 a[href*="/dp/"], a[href*="/dp/"]'
                     ).forEach(el => {
                         const href = el.getAttribute('href');
                         if (href && href.includes('/dp/') && !href.includes('sponsored')) {
@@ -90,13 +91,17 @@ export async function scrapeSellersByCategory({ categoryConfig, maxSellers, prox
                 log.info(`🔗 ${productUrls.length} Produkt-URLs gefunden auf Seite ${pageNum}`);
 
                 // Produkt-Seiten einreihen (um Seller-ID zu finden)
+                const requests = [];
                 for (const url of productUrls) {
                     if (collectedSellers.size < maxSellers) {
-                        await requestQueue.addRequest({
+                        requests.push({
                             url,
                             userData: { type: 'PRODUCT_PAGE' },
                         });
                     }
+                }
+                if (requests.length > 0) {
+                    await crawler.addRequests(requests);
                 }
 
                 // Nächste Suchergebnisseite einreihen (Pagination)
@@ -110,10 +115,10 @@ export async function scrapeSellersByCategory({ categoryConfig, maxSellers, prox
                     });
 
                     if (nextPageUrl) {
-                        await requestQueue.addRequest({
+                        await crawler.addRequests([{
                             url: nextPageUrl,
                             userData: { type: 'SEARCH_PAGE', page: pageNum + 1 },
-                        });
+                        }]);
                     }
                 }
 
@@ -121,11 +126,14 @@ export async function scrapeSellersByCategory({ categoryConfig, maxSellers, prox
             } else if (type === 'PRODUCT_PAGE') {
                 if (collectedSellers.size >= maxSellers) return;
 
+                // Warten bis Seite geladen
+                await page.waitForSelector('#dp, #ppd', { timeout: 10000 }).catch(() => {});
+
                 // Seller-ID aus Seite extrahieren
                 const sellerInfo = await page.evaluate(() => {
                     // Verkäufer-Link finden
                     const sellerLink = document.querySelector(
-                        '#sellerProfileTriggerId, a[href*="seller="]'
+                        '#sellerProfileTriggerId, #merchant-info a[href*="seller="], a[href*="seller="]'
                     );
                     if (!sellerLink) return null;
 
@@ -147,7 +155,7 @@ export async function scrapeSellersByCategory({ categoryConfig, maxSellers, prox
                 const sellerProfileUrl =
                     `https://www.amazon.de/sp?seller=${sellerInfo.sellerId}&marketplaceID=A1PA6795UKMFR9`;
 
-                await requestQueue.addRequest({
+                await crawler.addRequests([{
                     url: sellerProfileUrl,
                     userData: {
                         type: 'SELLER_PROFILE',
@@ -155,7 +163,7 @@ export async function scrapeSellersByCategory({ categoryConfig, maxSellers, prox
                         sellerName: sellerInfo.sellerName,
                         category: categoryName,
                     },
-                });
+                }]);
 
             // ── SELLER-PROFILSEITE verarbeiten ──────────────────────────────
             } else if (type === 'SELLER_PROFILE') {
@@ -164,7 +172,12 @@ export async function scrapeSellersByCategory({ categoryConfig, maxSellers, prox
                 const { sellerId, sellerName } = request.userData;
                 log.info(`👤 Verarbeite Händler-Profil: ${sellerName} (${sellerId})`);
 
-                // Impressum-Tab finden und anklicken
+                // Warten bis Seller-Profil geladen
+                await page.waitForSelector('#page-section-detail-seller-info, #seller-profile-container, .a-box', {
+                    timeout: 15000,
+                }).catch(() => {});
+
+                // Impressum-Daten extrahieren
                 const impressumData = await extractImpressum(page);
 
                 const sellerData = {
@@ -181,13 +194,6 @@ export async function scrapeSellersByCategory({ categoryConfig, maxSellers, prox
 
                 collectedSellers.set(sellerId, sellerData);
 
-                // Pay-per-Event: 1 Token pro Händler ─────────────────────────
-                try {
-                    await Actor.charge({ eventName: 'seller-scraped', count: 1 });
-                } catch (e) {
-                    log.warning(`⚠️ Actor.charge fehlgeschlagen (lokal normal): ${e.message}`);
-                }
-
                 log.info(
                     `✅ [${collectedSellers.size}/${maxSellers}] ${sellerData.sellerName} | ` +
                     `📧 ${sellerData.email || '—'} | 📞 ${sellerData.phone || '—'}`
@@ -199,6 +205,12 @@ export async function scrapeSellersByCategory({ categoryConfig, maxSellers, prox
             log.error(`❌ Request fehlgeschlagen: ${request.url}`, { error: error.message });
         },
     });
+
+    // Start-URL hinzufügen und Crawler starten
+    await crawler.addRequests([{
+        url: searchUrl,
+        userData: { type: 'SEARCH_PAGE', page: 1 },
+    }]);
 
     await crawler.run();
     return [...collectedSellers.values()];
@@ -219,10 +231,10 @@ async function extractImpressum(page) {
 
     try {
         // Impressum-/Detailbereich-Link suchen und anklicken
-        const detailLink = await page.$('a[href*="seller-profile"], #page-section-detail-seller-info a');
+        const detailLink = await page.$('a[href*="seller-profile"], #page-section-detail-seller-info a, a:has-text("Impressum"), a:has-text("Detaillierte")');
         if (detailLink) {
             await detailLink.click();
-            await page.waitForTimeout(1500);
+            await page.waitForTimeout(2000);
         }
 
         // Gesamten Seitentext holen und parsen
@@ -235,7 +247,7 @@ async function extractImpressum(page) {
                 document.body,
             ];
             for (const el of sections) {
-                if (el) return el.innerText;
+                if (el && el.innerText.trim().length > 50) return el.innerText;
             }
             return document.body.innerText;
         });
@@ -250,7 +262,7 @@ async function extractImpressum(page) {
 
         // Telefon (deutsche Formate)
         const phoneMatch = pageText.match(
-            /(?:Tel(?:efon)?\.?:?\s*|Phone:?\s*|☎\s*)(\+?[\d\s\-\/\(\)]{7,20})/i
+            /(?:Tel(?:efon)?\.?:?\s*|Phone:?\s*|Fon:?\s*|☎\s*)(\+?[\d\s\-\/\(\)]{7,20})/i
         );
         if (phoneMatch) result.phone = phoneMatch[1].trim().replace(/\s+/g, ' ');
 
@@ -269,7 +281,8 @@ async function extractImpressum(page) {
             l.toLowerCase().includes('e.k.')    ||
             l.toLowerCase().includes('e.k')     ||
             l.toLowerCase().includes('gbr')     ||
-            l.toLowerCase().includes('ug')
+            l.toLowerCase().includes('ug')      ||
+            l.toLowerCase().includes('ohg')
         );
         if (nameIdx !== -1) result.companyName = lines[nameIdx];
 

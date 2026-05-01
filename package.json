@@ -11,7 +11,7 @@
   "dependencies": {
     "apify": "^3.2.2",
     "crawlee": "^3.9.0",
-    "playwright": "^1.44.0",
+    "playwright": "*",
     "exceljs": "^4.4.0"
   },
   "engines": {
